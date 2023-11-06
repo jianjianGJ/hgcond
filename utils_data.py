@@ -1,8 +1,7 @@
 #%%
 import torch
 import torch_geometric.transforms as T 
-from torch_geometric.datasets import DBLP, OGB_MAG, IMDB, HGBDataset, AMiner
-from torch_geometric.datasets.fake import FakeHeteroDataset
+from torch_geometric.datasets import DBLP, IMDB, HGBDataset, AMiner
 from utils import asymmetric_gcn_norm
 
 import prettytable as pt
@@ -15,14 +14,12 @@ def get_AMiner(root):
     data['paper'].x = torch.load(root+'/AMiner/raw/paper.tensor')
     data['venue'].x = torch.load(root+'/AMiner/raw/venue.tensor')
     #________________________train/val/test split__________________________________
-    # torch.manual_seed(0)
-    # index_labeled_rand = data['author'].y_index[torch.randperm(data['author'].y_index.shape[0])]
-    # torch.save(index_labeled_rand,root+'/AMiner/raw/index_labeled_rand.tensor')
+    torch.manual_seed(0)
+    index_labeled_rand = data['author'].y_index[torch.randperm(data['author'].y_index.shape[0])]
     
     y = torch.ones(data['author'].x.shape[0], dtype=torch.long)*-1
     y[data['author'].y_index] = data['author'].y
     data['author'].y = y
-    index_labeled_rand = torch.load(root+'/AMiner/raw/index_labeled_rand.tensor')
     n = index_labeled_rand.shape[0]
     index_train = index_labeled_rand[:int(n*0.3)]
     index_val = index_labeled_rand[int(n*0.3):int(n*0.6)]
@@ -34,7 +31,6 @@ def get_AMiner(root):
     data['author'].test_mask = torch.zeros(data['author'].x.shape[0], dtype=torch.bool)
     data['author'].test_mask[index_test] = True
     #^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-    
     for edge_type in data.edge_types:
         data[edge_type]['adj_t'] = asymmetric_gcn_norm(data[edge_type]['adj_t'])
     data.target_node_type='author'
@@ -79,12 +75,10 @@ def get_ACM(root):
     data.num_classes = int(data['paper'].y.max()+1)
     data.name = 'acm'
     #--------------------------------------------------------------------------
-    # for reproduce, we fix the splits
-    # torch.manual_seed(0)
-    # index = torch.arange(data['paper'].y.shape[0])
-    # index_labeled = index[data['paper'].train_mask]
-    # index_labeled_rand = index_labeled[torch.randperm(index_labeled.shape[0])]
-    index_labeled_rand = torch.load(root+'/acm/raw/index_labeled_rand.tensor')
+    torch.manual_seed(0)
+    index = torch.arange(data['paper'].y.shape[0])
+    index_labeled = index[data['paper'].train_mask]
+    index_labeled_rand = index_labeled[torch.randperm(index_labeled.shape[0])]
     index_train = index_labeled_rand[:200]
     index_val = index_labeled_rand[200:400]
     index_test = index_labeled_rand[400:]
@@ -102,24 +96,55 @@ def get_Freebase(root):
     transform = T.Compose([T.ToUndirected(), T.ToSparseTensor(remove_edge_index=False)])#
     dataset = HGBDataset(root, name='Freebase',transform=transform)
     data = dataset[0]
-    ######################################################### set features
-    x_dict = torch.load('../datahetero/freebase/raw/x_dict.dict')
-    for node_type in data.node_types:
-        data[node_type].x = x_dict[node_type]
-    ######################################################### set features done
-    for edge_type in data.edge_types:
-        data[edge_type]['adj_t'] = asymmetric_gcn_norm(data[edge_type]['adj_t'])
     data.target_node_type='book'
     data.num_classes = int(data['book'].y.max()+1)
     data.name = 'freebase'
+    ######################################################### set features
+    h_dict = {}
+    for node_type in data.node_types:
+        if node_type != 'book':
+            h_dict[node_type] = None
+        else:
+            x = torch.zeros(data['book'].num_nodes, data.num_classes, dtype = int)
+            x[data['book'].train_mask] = torch.nn.functional.one_hot(data['book'].y[data['book'].train_mask])
+            h_dict[node_type] = x.to(torch.float)
+    for l in range(3):
+        out_dict = {}
+        for node_type in data.node_types:
+            if h_dict[node_type] is not None:
+                out_dict[node_type] = [0.1 * h_dict[node_type]]
+            else:
+                out_dict[node_type] = []
+                
+        for edge_type, adj_t in data.adj_t_dict.items():
+            src_type, _, dst_type = edge_type
+            if h_dict[src_type] is not None:
+                out_dict[dst_type].append(adj_t @ h_dict[src_type])
+                
+        for node_type in data.node_types:
+            if out_dict[node_type]:
+                width = max([i.shape[1] for i in out_dict[node_type]])
+                accumulated = torch.zeros(data[node_type].num_nodes, width)
+                for h in out_dict[node_type]:
+                    accumulated[:,:h.shape[1]] += h
+                h_dict[node_type] = accumulated
+            else:
+                h_dict[node_type] = None
+    for node_type in data.node_types:
+        mean = h_dict[node_type][h_dict[node_type]>0].mean()
+        h_dict[node_type][h_dict[node_type]>mean] = 1
+        h_dict[node_type][h_dict[node_type]<=mean] = 0
+    for node_type in data.node_types:
+        data[node_type].x = h_dict[node_type]
+    ######################################################### set features done
+    for edge_type in data.edge_types:
+        data[edge_type]['adj_t'] = asymmetric_gcn_norm(data[edge_type]['adj_t'])
+    
     #-------------------------------------------------------------total 2386 labels
-    # torch.manual_seed(0)
-    # index = torch.arange(data['book'].y.shape[0])
-    # index_labeled = index[data['book'].train_mask]
-    # index_labeled_rand = index_labeled[torch.randperm(index_labeled.shape[0])]
-    # torch.save(index_labeled_rand, root+'/freebase/raw/index_labeled_rand.tensor')
-    # for reproduce, we fix the splits
-    index_labeled_rand = torch.load(root+'/freebase/raw/index_labeled_rand.tensor')
+    torch.manual_seed(0)
+    index = torch.arange(data['book'].y.shape[0])
+    index_labeled = index[data['book'].train_mask]
+    index_labeled_rand = index_labeled[torch.randperm(index_labeled.shape[0])]
     index_train = index_labeled_rand[:500]
     index_val = index_labeled_rand[500:1000]
     index_test = index_labeled_rand[1000:]
@@ -132,10 +157,11 @@ def get_Freebase(root):
     #--------------------------------------------------------------------------
     node_info, edge_info = get_datainfo(data)
     data.info = node_info+'\n'+edge_info
+    
     return data
 
-# dblp imdb acm mag
-def get_data(name, root = '../datahetero', ):
+# dblp imdb acm Aminer
+def get_data(name, root = './datahetero', ):
     if name.lower() == 'dblp':
         return get_DBLP(root)
     elif name.lower() == 'imdb':
@@ -202,7 +228,7 @@ if __name__ == '__main__':
         info += edge_info
         info += '\n'
         info += '\n'
-    with open('datainfo.txt','w') as f:    #设置文件对象
+    with open('datainfo.txt','w') as f:  
         f.write(info) 
         
         
