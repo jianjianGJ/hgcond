@@ -1,6 +1,5 @@
-# HGCond
-The code of paper "Heterogeneous Graph Condensation".  
-Abstract—Graph neural networks greatly facilitate data processing in homogeneous and heterogeneous graphs. However, training
+#Heterogeneous Graph Condensation
+**Abstract**—Graph neural networks greatly facilitate data processing in homogeneous and heterogeneous graphs. However, training
 GNNs on large-scale graphs poses a significant challenge to computing resources. It is especially prominent on heterogeneous
 graphs, which contain multiple types of nodes and edges, and heterogeneous GNNs are also several times more complex than the
 ordinary GNNs. Recently, Graph condensation (GCond) is proposed to address the challenge by condensing large-scale
