@@ -6,13 +6,13 @@ import time
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn.init import orthogonal_
-from utils import asymmetric_gcn_norm
 from torch_scatter import scatter_mean, scatter_sum
 from sklearn.cluster import BisectingKMeans 
 import prettytable as pt
 from utils import (get_GNN, train_model_ealystop, lazy_initialize, 
-                   evalue_model, related_parameters, train_model)
-#%% Functions in Fuxian
+                   evalue_model, related_parameters, train_model,
+                   asymmetric_gcn_norm)
+#%% 
 def match_loss(gw_syns, gw_reals):
     dis = 0
     for ig in range(len(gw_reals)):
@@ -67,6 +67,7 @@ def cluster_initialize(data, num_syn_dict, model_name, architecture, opt_paramet
     if os.path.exists(file_path):#load pre-calculated results
         cluster_dict, cluster_adi_dict, cluster_y_count = torch.load(file_path) #device is cpu
     else:
+        print('Getting embedding for clustering:')
         model = get_GNN(model_name)(**architecture, 
                                     out_channels=num_classes, 
                                     node_types=data.node_types, 
@@ -77,10 +78,11 @@ def cluster_initialize(data, num_syn_dict, model_name, architecture, opt_paramet
         acc = train_model_ealystop(model, opt_parameter, x_dict, adj_t_dict, y, train_mask, val_mask)
         time_end=time.time()
         time_used = time_end-time_start
-        print(f'acc:{acc:.4f} time for 100epochs:{time_used:.4f}')
+        print(f'Embedding obtained: acc:{acc:.4f} time for 100 epochs:{time_used:.4f}')
         _, h_dict = model(x_dict, adj_t_dict, get_embeddings=True)
         h_dict = {node_type:h.detach().cpu() for node_type,h in h_dict.items()}
         cluster_dict = {}# cluster result (cluster labels) for all node_types
+        print('Clustering for initialization.')
         for node_type, h in h_dict.items():
             k_means = BisectingKMeans(n_clusters=num_syn_dict[node_type], random_state=0)
             k_means.fit(h)
@@ -125,8 +127,10 @@ def cluster_initialize(data, num_syn_dict, model_name, architecture, opt_paramet
         edge_cout = cluster_adi_dict[edge_type]
         # edge_cout[edge_cout<1] = 0
         indices_dict[edge_type] = torch.LongTensor(edge_cout.to_sparse().indices())
+    print('Initialization obtained.')
     return x_initial_dict, indices_dict, y_syn, mask_syn
 #%% GraphSynthesizer
+
 class GraphSynthesizer(nn.Module):
 
     def __init__(self, data, cond_rate, feat_init='cluster', edge_hidden_channels=None):
@@ -142,7 +146,7 @@ class GraphSynthesizer(nn.Module):
         #-------------------------------------------------------------------------
         self.num_syn_dict = {}
         for node_type,x in data.x_dict.items():
-            num_syn = max(int(x.shape[0]*cond_rate),1) #####################
+            num_syn = max(int(x.shape[0]*cond_rate),1) 
             self.num_syn_dict[node_type] = num_syn
         #-------------------------------------------------------------------------
         if feat_init=='cluster':
@@ -160,9 +164,7 @@ class GraphSynthesizer(nn.Module):
         elif feat_init=='sample':
             x_initial_dict, indices_dict, y_syn, mask_syn = gcond_initialize(data, self.num_syn_dict)
         
-        for node_type,x in data.x_dict.items():#to remove empty clusters
-            self.num_syn_dict[node_type] = x_initial_dict[node_type].shape[0]
-            
+        
         self.x_initial_dict = {k:v.to(self.device) for k,v in x_initial_dict.items()}
         self.indices_dict = {k:v.to(self.device) for k,v in indices_dict.items()}
         self.y_syn, self.mask_syn = y_syn.to(self.device), mask_syn.to(self.device)
@@ -180,7 +182,7 @@ class GraphSynthesizer(nn.Module):
                 in_channels = data.x_dict[src_type].shape[1] + data.x_dict[dst_type].shape[1]
                 self.edge_mlp_dict[edge_type] = \
                     nn.Sequential(nn.Linear(in_channels, edge_hidden_channels),
-                                    # nn.BatchNorm1d(edge_hidden_channels),
+                                    nn.BatchNorm1d(edge_hidden_channels),
                                     nn.ReLU(),
                                     # nn.Linear(edge_hidden_channels, edge_hidden_channels),
                                     # nn.BatchNorm1d(edge_hidden_channels),
@@ -208,6 +210,8 @@ class GraphSynthesizer(nn.Module):
                 num_dst = int(num_dst.sum().item())
             adj_t_syn = torch.zeros(size=(num_dst, num_src), device=self.device)
             indices = self.indices_dict[edge_type]
+            if indices.shape[1] <= 1:
+                continue
             row, col = indices[0], indices[1]
             if self.edge_hidden_channels is None:
                 adj_t_syn[row, col] = 1.
@@ -304,7 +308,6 @@ def evalue_hgcond(num_evalue, data, x_syn_dict, adj_t_syn_dict, y_syn, mask_syn,
                     patience += 1
                 if patience == max_patience:
                     trig_early_stop = True
-        # print(cc)
         #--------------------------------------------------------------------------
         val_model.load_state_dict(weights)
         acc,f1_micro,f1_macro = evalue_model(val_model, x_dict, adj_t_dict, y, test_mask)
@@ -312,61 +315,7 @@ def evalue_hgcond(num_evalue, data, x_syn_dict, adj_t_syn_dict, y_syn, mask_syn,
         f1_micros.append(f1_micro)
         f1_macros.append(f1_macro)
     return accs,f1_micros,f1_macros
-def evalue_hgcond_patience(num_evalue, data, x_syn_dict, adj_t_syn_dict, y_syn, mask_syn, 
-                  model_name, model_architecture, model_train, loss_fn = F.cross_entropy):
-    node_types = data.node_types                                # cross_entropy nll_loss
-    edge_types = data.edge_types
-    target_node_type, num_classes = data.target_node_type, data.num_classes
-    x_dict, adj_t_dict, y = data.x_dict, data.adj_t_dict, data[target_node_type].y
-    train_mask = data[target_node_type].train_mask
-    val_mask =  data[target_node_type].val_mask
-    test_mask = data[target_node_type].test_mask
-    device = train_mask.device
-    
-    x_syn_dict = {k:v.to(device) for k,v in x_syn_dict.items()}
-    adj_t_syn_dict = {k:v.to(device) for k,v in adj_t_syn_dict.items()}
-    y_syn = y_syn.to(device)
-    mask_syn = mask_syn.to(device)
-    
-    val_model = get_GNN(model_name)(**model_architecture, 
-                                out_channels=num_classes, 
-                                node_types=node_types, 
-                                edge_types=edge_types,
-                                target_node_type=target_node_type).to(device)
-    lazy_initialize(val_model, x_dict, adj_t_dict)
-    
-    max_patience = 5
-    accs, f1_micros, f1_macros = [], [], []
-    for i in range(num_evalue):
-        best_acc = 0.
-        optimizer_val_model = torch.optim.Adam(val_model.parameters(), lr=model_train['lr'])
-        for j in tqdm(range(model_train['epochs']),desc='Traning', ncols=80):
-            val_model.train()
-            optimizer_val_model.zero_grad()
-            logits_train = val_model(x_syn_dict, adj_t_syn_dict)[mask_syn]
-            loss = loss_fn(logits_train, y_syn[mask_syn])# cross_entropy nll_loss
-            loss.backward()
-            optimizer_val_model.step()
-            with torch.no_grad():
-                val_model.eval()
-                logits_val = val_model(x_dict, adj_t_dict)[val_mask]
-                acc = (logits_val.argmax(1) == y[val_mask]).sum()/logits_val.shape[0]
-                if acc > best_acc:
-                    best_acc = acc
-                    patience = 0
-                    weights = deepcopy(val_model.state_dict())
-                else:
-                    patience += 1
-                if patience == max_patience:
-                    break
-        # print(cc)
-        #--------------------------------------------------------------------------
-        val_model.load_state_dict(weights)
-        acc,f1_micro,f1_macro = evalue_model(val_model, x_dict, adj_t_dict, y, test_mask)
-        accs.append(acc)
-        f1_micros.append(f1_micro)
-        f1_macros.append(f1_macro)
-    return accs,f1_micros,f1_macros
+
 #%%
 class Orth_Initializer:
     def __init__(self, model):
@@ -459,4 +408,6 @@ def hgcond(data, cond_rate, feat_init, para_init, basicmodel, model_architecture
         losses_log.append(loss_avg)
         if loss_avg < smallest_loss:
             smallest_loss = loss_avg
+            graphsyner.best_x_syn_dict = graphsyner.get_x_syn_detached_dict()
+            graphsyner.best_adj_t_syn_dict = graphsyner.get_adj_t_syn_detached_dict()
     return graphsyner, losses_log
