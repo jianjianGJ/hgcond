@@ -1,2 +1,1 @@
-Datasets will be downloaded automatically. 
-If download failed, you may check the source code of `torch_geometric.datasets` and update the url.
+The dataset will be downloaded automatically. If the download fails, you can view the source code of `torch_geometric.datasets` and update the url.
