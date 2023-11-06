@@ -1,8 +1,7 @@
 # hgcond
 
 
-## Our Setup
-   lib            version
+## Our environment configuration
 * python          3.8
 * torch           1.12.1+cu113
 * torch_geometric 2.1.0
